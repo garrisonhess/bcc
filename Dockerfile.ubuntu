@@ -1,32 +1,48 @@
-ARG OS_TAG=18.04
-FROM ubuntu:${OS_TAG} as builder
-
-ARG OS_TAG
-ARG BUILD_TYPE=release
-ARG DEBIAN_FRONTEND=noninteractive
-
-MAINTAINER Brenden Blanco <bblanco@gmail.com>
-
-RUN apt-get -qq update && \
-    apt-get -y install pbuilder aptitude
+FROM ubuntu:18.04
 
 COPY ./ /root/bcc
 
 WORKDIR /root/bcc
 
-RUN /usr/lib/pbuilder/pbuilder-satisfydepends && \
-    ./scripts/build-deb.sh ${BUILD_TYPE}
+RUN apt-get -qq update && apt-get -y install pbuilder aptitude
+RUN apt-get update -y 
+RUN apt-get install -y python python3 python3-pip binutils libelf1 kmod  
+RUN pip3 install dnslib cachetools
+RUN apt-get -y install bison build-essential cmake flex git libedit-dev \
+  libllvm6.0 llvm-6.0-dev libclang-6.0-dev python zlib1g-dev libelf-dev libfl-dev python3-distutils
 
-FROM ubuntu:${OS_TAG}
 
-COPY --from=builder /root/bcc/*.deb /root/bcc/
+# compile bcc
+WORKDIR /root/bcc/build
+RUN cmake ..
+RUN make
+RUN sudo make install
+RUN cmake -DPYTHON_CMD=python3 .. # build python3 binding
 
-RUN \
-  apt-get update -y && \
-  DEBIAN_FRONTEND=noninteractive apt-get install -y python python3 python3-pip binutils libelf1 kmod  && \
-  if [ ${OS_TAG} = "18.04" ];then \
-    apt-get -y install python-pip && \
-    pip install dnslib cachetools ; \
-  fi ; \
-  pip3 install dnslib cachetools  && \
-  dpkg -i /root/bcc/*.deb
+# setup python binding
+WORKDIR /root/bcc/build/src/python/
+RUN make
+RUN sudo make install
+
+# setup postgres environment variables
+WORKDIR /root/bcc/matt_postgres/postgres/
+RUN export PG_DATA_DIR=/root/pg/data/primary
+RUN export PG_BUILD_DIR=/root/pg/build/
+RUN export PGPORT=5433
+RUN mkdir -p $PG_DATA_DIR
+RUN mkdir -p $PG_BUILD_DIR
+
+# compile postgres
+RUN ./configure --enable-cassert --enable-debug --prefix $PG_BUILD_DIR CFLAGS="-ggdb -Og -g3 -fno-omit-frame-pointer"
+RUN make -j32 -s
+RUN make install -j32 -s
+
+# initialize postgres data directory
+RUN $PG_BUILD_DIR/bin/initdb -D $PG_DATA_DIR
+
+# start the server
+RUN $PG_BUILD_DIR/bin/postmaster -D $PG_DATA_DIR -p $PGPORT
+RUN $PG_BUILD_DIR/bin/createdb -p $PGPORT gh-test
+RUN $PG_BUILD_DIR/bin/psql -p $PGPORT gh-test
+
+WORKDIR /root/bcc/
